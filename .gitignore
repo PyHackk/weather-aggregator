@@ -13,3 +13,151 @@ venv/
 *.db
 .DS_Store
 migrations/
+
+
+
+
+cat > /data/docker-images/qdi-api-image/qdi-api.yml << 'EOF'
+version: "3.8"
+
+services:
+  qdi-api:
+    image: cmppcia-docker.artifactory.cib.echonet:443/qdi/api:latest
+    command: >
+      gunicorn src.core.config:app
+      --workers 4
+      --worker-class uvicorn.workers.UvicornWorker
+      --bind 0.0.0.0:8888
+      --timeout 120
+      --keep-alive 5
+      --log-config /app/logging.yaml
+    ports:
+      - "8888:8888"
+    networks:
+      - qdi-api-network
+    environment:
+      - EXPOSED_PORT=8888
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPATH=/app
+      - SSL_CERT_FILE=/app/certs/CA_Bundle.pem
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - HTTP_PROXY=http://envoy:15000
+      - HTTPS_PROXY=http://envoy:15000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: start-first
+
+  celery-worker:
+    image: cmppcia-docker.artifactory.cib.echonet:443/qdi/api:latest
+    command: >
+      celery -A src.core.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=default,heavy
+      -E
+    networks:
+      - qdi-api-network
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPATH=/app
+      - SSL_CERT_FILE=/app/certs/CA_Bundle.pem
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - HTTP_PROXY=http://envoy:15000
+      - HTTPS_PROXY=http://envoy:15000
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  redis:
+    image: cmppcia-docker.artifactory.cib.echonet:443/redis:7-alpine
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+    networks:
+      - qdi-api-network
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  envoy:
+    image: cmppcia-docker.artifactory.cib.echonet:443/envoyproxy/envoy:latest
+    networks:
+      - qdi-api-network
+    ports:
+      - "15000:15000"
+      - "9901:9901"
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+networks:
+  qdi-api-network:
+    driver: overlay
+
+volumes:
+  redis-data:
+    driver: local
+EOF
